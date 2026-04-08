@@ -1,0 +1,145 @@
+syntax = "proto3";
+package lunaris.notification;
+
+// ── Enums ────────────────────────────────────────────────────────────────
+
+enum Priority {
+    PRIORITY_LOW = 0;
+    PRIORITY_NORMAL = 1;
+    PRIORITY_HIGH = 2;
+    PRIORITY_CRITICAL = 3;
+}
+
+enum CloseReason {
+    CLOSE_EXPIRED = 0;
+    CLOSE_DISMISSED = 1;
+    CLOSE_CLOSED = 2;
+    CLOSE_UNDEFINED = 3;
+}
+
+enum DndMode {
+    DND_OFF = 0;
+    DND_ON = 1;
+    DND_SCHEDULED = 2;
+}
+
+// ── Data types ───────────────────────────────────────────────────────────
+
+message Action {
+    string key = 1;
+    string label = 2;
+}
+
+message Notification {
+    uint32 id = 1;
+    string app_name = 2;
+    string summary = 3;
+    string body = 4;
+    string app_icon = 5;
+    repeated Action actions = 6;
+    Priority priority = 7;
+    string category = 8;
+    string timestamp = 9;
+    bool read = 10;
+}
+
+// ── Server -> Client messages ────────────────────────────────────────────
+
+message ServerMessage {
+    oneof msg {
+        NotificationAdded added = 1;
+        NotificationClosed closed = 2;
+        ActionInvoked action_invoked = 3;
+        NotificationRead notification_read = 4;
+        AllCleared all_cleared = 5;
+        DndStateChanged dnd_changed = 6;
+        SyncResponse sync = 7;
+        HistoryResponse history = 8;
+        CountUpdate count_update = 9;
+    }
+}
+
+message NotificationAdded {
+    Notification notification = 1;
+}
+
+message NotificationClosed {
+    uint32 id = 1;
+    CloseReason reason = 2;
+}
+
+message ActionInvoked {
+    uint32 id = 1;
+    string action_key = 2;
+}
+
+message NotificationRead {
+    uint32 id = 1;
+}
+
+message AllCleared {
+}
+
+message DndStateChanged {
+    DndMode mode = 1;
+}
+
+message SyncResponse {
+    repeated Notification pending = 1;
+    uint32 unread_count = 2;
+    DndMode dnd_mode = 3;
+}
+
+message HistoryResponse {
+    repeated Notification notifications = 1;
+    bool has_more = 2;
+}
+
+message CountUpdate {
+    uint32 pending_count = 1;
+    uint32 unread_count = 2;
+}
+
+// ── Client -> Server messages ────────────────────────────────────────────
+
+message ClientMessage {
+    oneof msg {
+        ClientHello hello = 1;
+        DismissNotification dismiss = 2;
+        InvokeAction invoke_action = 3;
+        MarkRead mark_read = 4;
+        ClearAll clear_all = 5;
+        SetDndMode set_dnd = 6;
+        GetHistory get_history = 7;
+    }
+}
+
+message ClientHello {
+    string client_name = 1;
+}
+
+message DismissNotification {
+    uint32 id = 1;
+}
+
+message InvokeAction {
+    uint32 id = 1;
+    string action_key = 2;
+}
+
+message MarkRead {
+    uint32 id = 1;
+}
+
+message ClearAll {
+}
+
+message SetDndMode {
+    DndMode mode = 1;
+}
+
+message GetHistory {
+    uint32 limit = 1;
+    string before_timestamp = 2;
+    string app_name = 3;
+}
