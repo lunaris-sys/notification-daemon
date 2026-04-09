@@ -22,6 +22,28 @@ impl Database {
     ///
     /// Use `:memory:` for an in-memory database (tests).
     pub async fn open(url: &str) -> Result<Self, NotifyError> {
+        // Ensure parent directory exists for file-based databases.
+        if let Some(path_str) = url.strip_prefix("sqlite:") {
+            // Strip query parameters (?mode=rwc etc.).
+            let file_part = path_str.split('?').next().unwrap_or(path_str);
+            if !file_part.starts_with(":memory:")
+                && !file_part.contains("mode=memory")
+                && !file_part.is_empty()
+            {
+                let path = std::path::Path::new(file_part);
+                if let Some(parent) = path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            NotifyError::Db(format!(
+                                "create dir {}: {e}",
+                                parent.display()
+                            ))
+                        })?;
+                    }
+                }
+            }
+        }
+
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
             .connect(url)

@@ -36,7 +36,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
         .join("lunaris");
     let _ = std::fs::create_dir_all(&db_dir);
-    let db_path = format!("sqlite:{}", db_dir.join("notifications.db").display());
+    let db_file = db_dir.join("notifications.db");
+    let db_path = format!("sqlite:{}?mode=rwc", db_file.display());
+    tracing::info!("opening database: {db_path}");
     let db = Arc::new(Database::open(&db_path).await?);
     tracing::info!("database opened at {db_path}");
 
