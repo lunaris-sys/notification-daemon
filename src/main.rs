@@ -44,10 +44,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Create manager.
     let (dbus_server, event_rx) = NotificationServer::new();
+    let event_tx = dbus_server.event_sender();
     let manager = Arc::new(NotificationManager::new(
         db.clone(),
         config.clone(),
-        dbus_server.event_sender(),
+        event_tx.clone(),
     ));
 
     // 4. Start D-Bus server.
@@ -63,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket_server = SocketServer::new(socket_path);
     let dnd_mode = manager.dnd_mode();
     tokio::spawn(async move {
-        if let Err(e) = socket_server.start(event_rx, db.clone(), dnd_mode).await {
+        if let Err(e) = socket_server.start(event_rx, event_tx, db.clone(), dnd_mode).await {
             tracing::error!("socket server error: {e}");
         }
     });

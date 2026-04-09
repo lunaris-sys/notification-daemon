@@ -85,6 +85,12 @@ pub enum NotifyEvent {
     Closed { id: u32, reason: CloseReason },
     /// An action was invoked on a notification.
     ActionInvoked { id: u32, action_key: String },
+    /// A notification was marked as read.
+    Read { id: u32 },
+    /// All notifications were cleared.
+    AllCleared,
+    /// DND mode changed.
+    DndChanged { mode: crate::config::DndMode },
 }
 
 // ---------------------------------------------------------------------------
@@ -245,15 +251,16 @@ impl NotificationServer {
             }
         }
 
-        let _ = self.events.send(NotifyEvent::Added(notification));
-
         tracing::info!(
             id,
             app_name,
+            app_icon,
             %summary,
             ?priority,
             "notification received",
         );
+
+        let _ = self.events.send(NotifyEvent::Added(notification));
 
         id
     }

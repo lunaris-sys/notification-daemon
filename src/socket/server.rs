@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, WriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, Mutex};
 
@@ -33,30 +33,27 @@ impl SocketServer {
     }
 
     /// Start listening for connections.
-    ///
-    /// `event_rx` receives events from the D-Bus server to broadcast.
-    /// `db` is the notification database for query handling.
     pub async fn start(
         &self,
         mut event_rx: broadcast::Receiver<NotifyEvent>,
+        event_tx: broadcast::Sender<NotifyEvent>,
         db: Arc<Database>,
         dnd_mode: Arc<Mutex<crate::config::DndMode>>,
     ) -> Result<(), NotifyError> {
-        // Ensure parent directory exists.
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        // Remove stale socket.
         let _ = std::fs::remove_file(&self.path);
 
         let listener = UnixListener::bind(&self.path).map_err(NotifyError::Io)?;
         tracing::info!("socket server listening on {}", self.path.display());
 
-        let clients: Arc<Mutex<Vec<Arc<Mutex<UnixStream>>>>> =
+        // Shared list of client writers for broadcasting.
+        let writers: Arc<Mutex<Vec<Arc<Mutex<WriteHalf<UnixStream>>>>>> =
             Arc::new(Mutex::new(Vec::new()));
 
-        // Broadcast task: forwards D-Bus events to all clients.
-        let clients_for_broadcast = clients.clone();
+        // Broadcast task: forwards D-Bus events to all connected clients.
+        let writers_for_broadcast = writers.clone();
         tokio::spawn(async move {
             while let Ok(event) = event_rx.recv().await {
                 let server_msg = match event {
@@ -86,6 +83,33 @@ impl SocketServer {
                             },
                         )),
                     },
+                    NotifyEvent::Read { id } => proto::ServerMessage {
+                        msg: Some(proto::server_message::Msg::NotificationRead(
+                            proto::NotificationRead { id },
+                        )),
+                    },
+                    NotifyEvent::AllCleared => proto::ServerMessage {
+                        msg: Some(proto::server_message::Msg::AllCleared(
+                            proto::AllCleared {},
+                        )),
+                    },
+                    NotifyEvent::DndChanged { mode } => proto::ServerMessage {
+                        msg: Some(proto::server_message::Msg::DndChanged(
+                            proto::DndStateChanged {
+                                mode: match mode {
+                                    crate::config::DndMode::Off => {
+                                        proto::DndMode::DndOff as i32
+                                    }
+                                    crate::config::DndMode::On => {
+                                        proto::DndMode::DndOn as i32
+                                    }
+                                    crate::config::DndMode::Scheduled => {
+                                        proto::DndMode::DndScheduled as i32
+                                    }
+                                },
+                            },
+                        )),
+                    },
                 };
 
                 let encoded = match crate::socket::protocol::encode_message(&server_msg) {
@@ -93,17 +117,18 @@ impl SocketServer {
                     Err(_) => continue,
                 };
 
-                let mut clients = clients_for_broadcast.lock().await;
+                let mut ws = writers_for_broadcast.lock().await;
                 let mut dead = Vec::new();
-                for (i, client) in clients.iter().enumerate() {
-                    let mut stream = client.lock().await;
-                    if stream.write_all(&encoded).await.is_err() {
+                for (i, w) in ws.iter().enumerate() {
+                    let mut writer = w.lock().await;
+                    if writer.write_all(&encoded).await.is_err()
+                        || writer.flush().await.is_err()
+                    {
                         dead.push(i);
                     }
                 }
-                // Remove dead clients in reverse order.
                 for i in dead.into_iter().rev() {
-                    clients.remove(i);
+                    ws.remove(i);
                 }
             }
         });
@@ -111,14 +136,21 @@ impl SocketServer {
         // Accept loop.
         loop {
             let (stream, _addr) = listener.accept().await.map_err(NotifyError::Io)?;
-            let client = Arc::new(Mutex::new(stream));
-            clients.lock().await.push(client.clone());
+
+            // Split the stream: reader for the handler, writer shared for
+            // both the handler (responses) and the broadcast task.
+            let (reader, write_half) = tokio::io::split(stream);
+            let writer = Arc::new(Mutex::new(write_half));
+
+            // Register writer for broadcasts.
+            writers.lock().await.push(writer.clone());
 
             let db = db.clone();
             let dnd = dnd_mode.clone();
+            let tx = event_tx.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_client(client, db, dnd).await {
+                if let Err(e) = handle_client(reader, writer, db, dnd, tx).await {
                     tracing::debug!("client disconnected: {e}");
                 }
             });
@@ -128,18 +160,18 @@ impl SocketServer {
 
 /// Handle a single client connection.
 async fn handle_client(
-    client: Arc<Mutex<UnixStream>>,
+    mut reader: tokio::io::ReadHalf<UnixStream>,
+    writer: Arc<Mutex<WriteHalf<UnixStream>>>,
     db: Arc<Database>,
     dnd_mode: Arc<Mutex<crate::config::DndMode>>,
+    event_tx: broadcast::Sender<NotifyEvent>,
 ) -> Result<(), NotifyError> {
     loop {
-        let msg: Option<proto::ClientMessage> = {
-            let mut stream = client.lock().await;
-            read_message(&mut *stream).await?
-        };
+        // Read from the reader half (does NOT hold the writer lock).
+        let msg: Option<proto::ClientMessage> = read_message(&mut reader).await?;
 
         let Some(msg) = msg else {
-            return Ok(()); // Clean disconnect.
+            return Ok(());
         };
 
         let Some(inner) = msg.msg else { continue };
@@ -147,7 +179,6 @@ async fn handle_client(
         let response: Option<proto::ServerMessage> = match inner {
             proto::client_message::Msg::Hello(hello) => {
                 tracing::info!("client connected: {}", hello.client_name);
-                // Sync response with pending notifications.
                 let pending = db.get_pending().await.unwrap_or_default();
                 let unread = pending.iter().filter(|n| !n.read).count() as u32;
                 let mode = *dnd_mode.lock().await;
@@ -167,18 +198,23 @@ async fn handle_client(
             }
             proto::client_message::Msg::Dismiss(d) => {
                 db.dismiss(d.id, CloseReason::Dismissed).await.ok();
-                None // Broadcast handled separately.
+                let _ = event_tx.send(NotifyEvent::Closed {
+                    id: d.id,
+                    reason: CloseReason::Dismissed,
+                });
+                None
             }
             proto::client_message::Msg::MarkRead(mr) => {
                 db.mark_read(mr.id).await.ok();
+                let _ = event_tx.send(NotifyEvent::Read { id: mr.id });
                 None
             }
             proto::client_message::Msg::ClearAll(_) => {
-                // Dismiss all pending.
                 let pending = db.get_pending().await.unwrap_or_default();
                 for n in &pending {
                     db.dismiss(n.id, CloseReason::Dismissed).await.ok();
                 }
+                let _ = event_tx.send(NotifyEvent::AllCleared);
                 None
             }
             proto::client_message::Msg::SetDnd(sd) => {
@@ -190,6 +226,7 @@ async fn handle_client(
                     _ => crate::config::DndMode::Off,
                 };
                 *dnd_mode.lock().await = new_mode;
+                let _ = event_tx.send(NotifyEvent::DndChanged { mode: new_mode });
                 None
             }
             proto::client_message::Msg::GetHistory(gh) => {
@@ -217,24 +254,21 @@ async fn handle_client(
                     )),
                 })
             }
-            proto::client_message::Msg::InvokeAction(_ia) => {
-                // Action invocation is forwarded via D-Bus signal.
-                // That integration requires the D-Bus connection reference.
-                // For now, just acknowledge.
+            proto::client_message::Msg::InvokeAction(ia) => {
+                let _ = event_tx.send(NotifyEvent::ActionInvoked {
+                    id: ia.id,
+                    action_key: ia.action_key,
+                });
                 None
             }
         };
 
         if let Some(resp) = response {
-            let mut stream = client.lock().await;
-            write_message(&mut *stream, &resp).await?;
+            let mut w = writer.lock().await;
+            write_message(&mut *w, &resp).await?;
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
