@@ -86,10 +86,8 @@ where
 
 use crate::dbus::server::{Notification, Priority};
 
-/// Generated proto types.
-pub mod proto {
-    include!(concat!(env!("OUT_DIR"), "/lunaris.notification.rs"));
-}
+/// Re-export proto types from the shared crate.
+pub use notification_proto::proto;
 
 impl From<&Notification> for proto::Notification {
     fn from(n: &Notification) -> Self {

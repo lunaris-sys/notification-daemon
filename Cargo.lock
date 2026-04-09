@@ -931,9 +931,9 @@ dependencies = [
  "chrono",
  "dirs",
  "libc",
+ "notification-proto",
  "notify",
  "prost",
- "prost-build",
  "serde",
  "serde_json",
  "sqlx",
@@ -999,6 +999,14 @@ name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
+
+[[package]]
+name = "notification-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-build",
+]
 
 [[package]]
 name = "notify"

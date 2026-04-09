@@ -25,9 +25,7 @@ notify = "7"
 prost = "0.13"
 bytes = "1"
 libc = "0.2"
-
-[build-dependencies]
-prost-build = "0.13"
+notification-proto = { path = "../notification-proto" }
 
 [dev-dependencies]
 tokio-test = "0.4"
