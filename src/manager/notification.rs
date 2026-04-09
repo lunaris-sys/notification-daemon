@@ -7,10 +7,8 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, Mutex};
 
-use crate::config::{AppOverride, Config, DndMode};
-use crate::dbus::server::{
-    CloseReason, Notification, NotifyEvent, Priority, determine_priority,
-};
+use crate::config::{Config, DndMode};
+use crate::dbus::server::{CloseReason, Notification, NotifyEvent, determine_priority};
 use crate::dnd::{DndState, SuppressResult};
 use crate::manager::grouping::derive_group_key;
 use crate::manager::rate_limiter::RateLimiter;
@@ -111,7 +109,10 @@ impl NotificationManager {
             read: false,
         };
 
-        // 5. Store in DB.
+        // 5. Derive group key (used by shell for visual grouping).
+        let group_key = derive_group_key(&notification);
+
+        // 6. Store in DB.
         if let Err(e) = self.db.insert_notification(&notification).await {
             tracing::error!("failed to store notification: {e}");
         }
@@ -131,16 +132,17 @@ impl NotificationManager {
             dnd_state.should_suppress(&notification, &config.dnd, app_override)
         };
 
-        // 7. Act on result.
+        // 8. Act on result.
         match suppress_result {
             SuppressResult::Allow => {
+                tracing::info!(id, %group_key, "notification broadcast");
                 let _ = self.events.send(NotifyEvent::Added(notification));
             }
             SuppressResult::Suppress => {
-                tracing::debug!(id, "notification suppressed by DND");
+                tracing::debug!(id, %group_key, "notification suppressed by DND");
             }
             SuppressResult::Queue => {
-                tracing::debug!(id, "notification queued (fullscreen)");
+                tracing::debug!(id, %group_key, "notification queued (fullscreen)");
                 self.fullscreen_queue.lock().await.push(notification);
             }
         }

@@ -1,0 +1,15 @@
+[Unit]
+Description=Lunaris Notification Daemon
+Documentation=https://github.com/lunaris-sys/notification-daemon
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.Notifications
+ExecStart=%h/.local/lib/lunaris/libexec/lunaris-notifyd
+
+# Restart on crash.
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

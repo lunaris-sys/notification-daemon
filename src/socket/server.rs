@@ -3,15 +3,14 @@
 /// Listens on a Unix socket, accepts multiple clients, broadcasts
 /// server messages to all, and routes client messages to handlers.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use prost::Message;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, Mutex};
 
-use crate::dbus::server::{CloseReason, Notification, NotifyEvent};
+use crate::dbus::server::{CloseReason, NotifyEvent};
 use crate::error::NotifyError;
 use crate::socket::protocol::{proto, read_message, write_message};
 use crate::storage::Database;
@@ -150,7 +149,6 @@ async fn handle_client(
                 tracing::info!("client connected: {}", hello.client_name);
                 // Sync response with pending notifications.
                 let pending = db.get_pending().await.unwrap_or_default();
-                let count = pending.len() as u32;
                 let unread = pending.iter().filter(|n| !n.read).count() as u32;
                 let mode = *dnd_mode.lock().await;
                 Some(proto::ServerMessage {

@@ -3,7 +3,7 @@
 /// Wire format: 4-byte big-endian length + protobuf body.
 /// Maximum message size: 1 MB.
 
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::BufMut;
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

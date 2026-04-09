@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::dbus::server::{CloseReason, Notification, Priority};
+use crate::dbus::server::{Notification, Priority};
 
 /// SQLite row representation of a notification.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -4,7 +4,7 @@
 /// queued based on DND mode, schedule, per-app overrides, and
 /// fullscreen state.
 
-use chrono::{Datelike, Local, NaiveTime, Timelike, Weekday};
+use chrono::{Datelike, Local, NaiveTime, Weekday};
 
 use crate::config::{AppOverride, DndConfig, DndMode};
 use crate::dbus::server::{Notification, Priority};
