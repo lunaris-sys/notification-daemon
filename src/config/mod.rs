@@ -3,7 +3,10 @@
 pub mod types;
 pub mod watcher;
 
-pub use types::{AppOverride, Config, DndConfig, DndMode, DndSchedule};
+pub use types::{
+    AppOverride, Config, DndConfig, DndMode, DndSchedule, GroupingConfig, HistoryConfig,
+    ScheduleMode,
+};
 
 use std::path::{Path, PathBuf};
 
@@ -50,10 +53,20 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("test.toml");
         let mut f = std::fs::File::create(&path).unwrap();
-        write!(f, "[dnd]\nmode = \"on\"\n").unwrap();
+        write!(f, "[dnd]\nmode = \"priority\"\n").unwrap();
 
         let c = load_config(&path);
-        assert_eq!(c.dnd.mode, DndMode::On);
+        assert_eq!(c.dnd.mode, DndMode::Priority);
+    }
+
+    #[test]
+    fn test_load_legacy_mode_on() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("legacy.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(f, "[dnd]\nmode = \"on\"\n").unwrap();
+        let c = load_config(&path);
+        assert_eq!(c.dnd.mode, DndMode::Priority);
     }
 
     #[test]

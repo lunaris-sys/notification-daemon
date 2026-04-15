@@ -304,6 +304,22 @@ impl Database {
                 .map_err(|e| NotifyError::Db(e.to_string()))?;
         Ok(count as u32)
     }
+
+    /// Return the set of distinct `app_name` values that have ever
+    /// sent a notification. Used by the Settings app's per-app rule
+    /// editor to populate its picker without having to wait for a
+    /// given app to send again.
+    pub async fn get_known_apps(&self) -> Result<Vec<String>, NotifyError> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT app_name FROM notifications \
+             WHERE app_name IS NOT NULL AND app_name != '' \
+             ORDER BY app_name COLLATE NOCASE ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| NotifyError::Db(e.to_string()))?;
+        Ok(rows.into_iter().map(|(s,)| s).collect())
+    }
 }
 
 /// Convert a sqlx Row to a Notification.
@@ -486,6 +502,42 @@ mod tests {
             .unwrap();
         assert_eq!(history.len(), 2);
         assert!(history.iter().all(|n| n.app_name == "Firefox"));
+    }
+
+    #[tokio::test]
+    async fn test_get_known_apps_distinct_sorted() {
+        let db = Database::open_memory().await.unwrap();
+        db.insert_notification(&make_notification(1, "Firefox", "a"))
+            .await
+            .unwrap();
+        db.insert_notification(&make_notification(2, "Spotify", "b"))
+            .await
+            .unwrap();
+        db.insert_notification(&make_notification(3, "firefox", "c"))
+            .await
+            .unwrap();
+        db.insert_notification(&make_notification(4, "Discord", "d"))
+            .await
+            .unwrap();
+
+        let apps = db.get_known_apps().await.unwrap();
+        // Distinct (case-sensitive in SQL, but ORDER BY is NOCASE),
+        // so "firefox" and "Firefox" both appear.
+        assert!(apps.contains(&"Discord".to_string()));
+        assert!(apps.contains(&"Firefox".to_string()));
+        assert!(apps.contains(&"Spotify".to_string()));
+        // Sorted alphabetically (case-insensitive).
+        let lower: Vec<String> = apps.iter().map(|s| s.to_lowercase()).collect();
+        let mut sorted = lower.clone();
+        sorted.sort();
+        assert_eq!(lower, sorted);
+    }
+
+    #[tokio::test]
+    async fn test_get_known_apps_empty() {
+        let db = Database::open_memory().await.unwrap();
+        let apps = db.get_known_apps().await.unwrap();
+        assert!(apps.is_empty());
     }
 
     #[tokio::test]

@@ -42,7 +42,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Arc::new(Database::open(&db_path).await?);
     tracing::info!("database opened at {db_path}");
 
-    // 3. Create manager.
+    // 3. Create manager. The D-Bus server delegates every incoming
+    // notify() call to `manager.handle_notify()` so DND / rate limits /
+    // SQLite storage all run in one place.
     let (dbus_server, event_rx) = NotificationServer::new();
     let event_tx = dbus_server.event_sender();
     let manager = Arc::new(NotificationManager::new(
@@ -50,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.clone(),
         event_tx.clone(),
     ));
+    dbus_server.set_manager(manager.clone());
 
     // 4. Start D-Bus server.
     let _conn = connection::Builder::session()?

@@ -6,14 +6,16 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::broadcast;
 use zbus::interface;
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::{OwnedValue, Value};
+
+use crate::manager::NotificationManager;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -148,29 +150,42 @@ fn parse_actions(raw: &[String]) -> Vec<(String, String)> {
 // ---------------------------------------------------------------------------
 
 /// Shared state for the notification server.
+///
+/// The D-Bus interface is intentionally thin: it generates IDs,
+/// extracts urgency/category hints, and then delegates the full
+/// pipeline (sanitisation, rate limit, DND, SQLite storage, broadcast)
+/// to `NotificationManager`. Previously this struct kept its own
+/// in-memory `Vec<Notification>` and bypassed the manager entirely —
+/// that left SQLite empty, DND dead, and rate limiting unused.
 pub struct NotificationServer {
     next_id: AtomicU32,
-    notifications: Arc<Mutex<Vec<Notification>>>,
     events: broadcast::Sender<NotifyEvent>,
+    /// Installed after construction via [`set_manager`]. `OnceLock`
+    /// keeps the struct constructible before the manager exists
+    /// (manager needs `event_sender()` from here).
+    manager: OnceLock<Arc<NotificationManager>>,
 }
 
 impl NotificationServer {
-    /// Create a new notification server.
+    /// Create a new notification server. The manager must be wired up
+    /// via [`set_manager`] before the D-Bus connection starts
+    /// accepting messages, otherwise `notify()` will fail closed.
     pub fn new() -> (Self, broadcast::Receiver<NotifyEvent>) {
         let (tx, rx) = broadcast::channel(256);
         (
             Self {
                 next_id: AtomicU32::new(1),
-                notifications: Arc::new(Mutex::new(Vec::new())),
                 events: tx,
+                manager: OnceLock::new(),
             },
             rx,
         )
     }
 
-    /// Get a snapshot of all stored notifications.
-    pub async fn get_all(&self) -> Vec<Notification> {
-        self.notifications.lock().await.clone()
+    /// Inject the notification manager. Must be called before the
+    /// D-Bus server is registered, and exactly once.
+    pub fn set_manager(&self, manager: Arc<NotificationManager>) {
+        let _ = self.manager.set(manager);
     }
 
     /// Get the event sender for subscribing to changes.
@@ -219,73 +234,56 @@ impl NotificationServer {
             })
             .unwrap_or_default();
 
-        let priority = determine_priority(urgency, expire_timeout, &category);
-        let parsed_actions = parse_actions(&actions);
-
-        let notification = Notification {
-            id,
-            app_name: app_name.to_owned(),
-            summary: summary.to_owned(),
-            body: body.to_owned(),
-            app_icon: app_icon.to_owned(),
-            actions: parsed_actions,
-            priority,
-            urgency,
-            category,
-            timestamp: Utc::now().to_rfc3339(),
-            expire_timeout,
-            read: false,
-        };
-
-        // Replace or insert.
-        {
-            let mut list = self.notifications.lock().await;
-            if replaces_id > 0 {
-                if let Some(existing) = list.iter_mut().find(|n| n.id == replaces_id) {
-                    *existing = notification.clone();
-                } else {
-                    list.push(notification.clone());
-                }
-            } else {
-                list.push(notification.clone());
-            }
-        }
-
         tracing::info!(
             id,
             app_name,
             app_icon,
             %summary,
-            ?priority,
-            "notification received",
+            urgency,
+            %category,
+            "D-Bus notify received"
         );
 
-        let _ = self.events.send(NotifyEvent::Added(notification));
+        // Delegate to the manager. Ownership of the full pipeline
+        // (validation, rate limit, DND, SQLite persistence, broadcast)
+        // lives there; this D-Bus method is now a thin adapter.
+        let Some(manager) = self.manager.get() else {
+            tracing::error!(
+                "D-Bus notify: manager not wired up, dropping notification"
+            );
+            return 0;
+        };
 
-        id
+        manager
+            .handle_notify(
+                id,
+                app_name,
+                app_icon,
+                summary,
+                body,
+                &actions,
+                urgency,
+                &category,
+                expire_timeout,
+            )
+            .await
     }
 
-    /// Close a notification by ID.
+    /// Close a notification by ID. Delegates dismissal to the manager
+    /// (which updates SQLite + broadcasts). The D-Bus `NotificationClosed`
+    /// signal is emitted here because it is a D-Bus concept.
     async fn close_notification(
         &self,
         id: u32,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) {
-        let removed = {
-            let mut list = self.notifications.lock().await;
-            let before = list.len();
-            list.retain(|n| n.id != id);
-            list.len() != before
-        };
-
-        if removed {
-            let _ = self.events.send(NotifyEvent::Closed {
-                id,
-                reason: CloseReason::Closed,
-            });
-            let _ = Self::notification_closed(&emitter, id, CloseReason::Closed as u32).await;
-            tracing::debug!(id, "notification closed via D-Bus");
+        if let Some(manager) = self.manager.get() {
+            manager.handle_close(id, CloseReason::Closed).await;
+        } else {
+            tracing::error!("D-Bus close: manager not wired up");
         }
+        let _ = Self::notification_closed(&emitter, id, CloseReason::Closed as u32).await;
+        tracing::debug!(id, "notification closed via D-Bus");
     }
 
     /// Return supported capabilities.

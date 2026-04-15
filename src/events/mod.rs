@@ -15,6 +15,13 @@ pub enum SystemEvent {
     FullscreenExited,
     /// DND was toggled from the shell.
     DndChanged { enabled: bool },
+    /// Focus Mode activated for a project.
+    FocusActivated {
+        project_id: String,
+        suppress_apps: Vec<String>,
+    },
+    /// Focus Mode deactivated.
+    FocusDeactivated,
 }
 
 /// Trait for receiving system events.

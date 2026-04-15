@@ -96,17 +96,7 @@ impl SocketServer {
                     NotifyEvent::DndChanged { mode } => proto::ServerMessage {
                         msg: Some(proto::server_message::Msg::DndChanged(
                             proto::DndStateChanged {
-                                mode: match mode {
-                                    crate::config::DndMode::Off => {
-                                        proto::DndMode::DndOff as i32
-                                    }
-                                    crate::config::DndMode::On => {
-                                        proto::DndMode::DndOn as i32
-                                    }
-                                    crate::config::DndMode::Scheduled => {
-                                        proto::DndMode::DndScheduled as i32
-                                    }
-                                },
+                                mode: dnd_mode_to_proto(mode),
                             },
                         )),
                     },
@@ -186,13 +176,7 @@ async fn handle_client(
                     msg: Some(proto::server_message::Msg::Sync(proto::SyncResponse {
                         pending: pending.iter().map(|n| n.into()).collect(),
                         unread_count: unread,
-                        dnd_mode: match mode {
-                            crate::config::DndMode::Off => proto::DndMode::DndOff as i32,
-                            crate::config::DndMode::On => proto::DndMode::DndOn as i32,
-                            crate::config::DndMode::Scheduled => {
-                                proto::DndMode::DndScheduled as i32
-                            }
-                        },
+                        dnd_mode: dnd_mode_to_proto(mode),
                     })),
                 })
             }
@@ -218,13 +202,7 @@ async fn handle_client(
                 None
             }
             proto::client_message::Msg::SetDnd(sd) => {
-                let new_mode = match sd.mode {
-                    x if x == proto::DndMode::DndOn as i32 => crate::config::DndMode::On,
-                    x if x == proto::DndMode::DndScheduled as i32 => {
-                        crate::config::DndMode::Scheduled
-                    }
-                    _ => crate::config::DndMode::Off,
-                };
+                let new_mode = proto_to_dnd_mode(sd.mode);
                 *dnd_mode.lock().await = new_mode;
                 let _ = event_tx.send(NotifyEvent::DndChanged { mode: new_mode });
                 None
@@ -261,12 +239,51 @@ async fn handle_client(
                 });
                 None
             }
+            proto::client_message::Msg::GetKnownApps(_) => {
+                let app_names = db.get_known_apps().await.unwrap_or_default();
+                Some(proto::ServerMessage {
+                    msg: Some(proto::server_message::Msg::KnownApps(
+                        proto::KnownAppsResponse { app_names },
+                    )),
+                })
+            }
         };
 
         if let Some(resp) = response {
             let mut w = writer.lock().await;
             write_message(&mut *w, &resp).await?;
         }
+    }
+}
+
+/// Map a `DndMode` to its proto wire value.
+///
+/// Each Lunaris mode now has its own dedicated proto enum value.
+/// `DndOn` is no longer used by this daemon (kept in the proto for
+/// backwards compatibility with old shell builds) — new clients
+/// should expect `DndPriority` / `DndAlarms` / `DndTotal` instead.
+fn dnd_mode_to_proto(mode: crate::config::DndMode) -> i32 {
+    use crate::config::DndMode;
+    match mode {
+        DndMode::Off => proto::DndMode::DndOff as i32,
+        DndMode::Priority => proto::DndMode::DndPriority as i32,
+        DndMode::Alarms => proto::DndMode::DndAlarms as i32,
+        DndMode::Total => proto::DndMode::DndTotal as i32,
+        DndMode::Scheduled => proto::DndMode::DndScheduled as i32,
+    }
+}
+
+fn proto_to_dnd_mode(value: i32) -> crate::config::DndMode {
+    use crate::config::DndMode;
+    match value {
+        x if x == proto::DndMode::DndPriority as i32 => DndMode::Priority,
+        x if x == proto::DndMode::DndAlarms as i32 => DndMode::Alarms,
+        x if x == proto::DndMode::DndTotal as i32 => DndMode::Total,
+        x if x == proto::DndMode::DndScheduled as i32 => DndMode::Scheduled,
+        // Legacy `DndOn` from old shell builds collapses to `Priority`,
+        // matching the serde alias on the config side.
+        x if x == proto::DndMode::DndOn as i32 => DndMode::Priority,
+        _ => DndMode::Off,
     }
 }
 

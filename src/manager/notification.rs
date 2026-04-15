@@ -112,25 +112,42 @@ impl NotificationManager {
         // 5. Derive group key (used by shell for visual grouping).
         let group_key = derive_group_key(&notification);
 
-        // 6. Store in DB.
-        if let Err(e) = self.db.insert_notification(&notification).await {
-            tracing::error!("failed to store notification: {e}");
-        }
-
-        // 6. Check DND.
-        let suppress_result = {
+        // 6. Evaluate DND/app rules BEFORE storage so `enabled = false`
+        // and `DndMode::Total` can cleanly drop the notification.
+        let (suppress_result, history_enabled) = {
             let config = self.config.lock().await;
-            let dnd_state = self.dnd_state.lock().await;
-            let app_override = config.apps.get(&input.app_name);
+            let app_override = config.apps.get(&input.app_name).cloned();
 
-            // Update DND mode from config (may have changed via hot-reload).
-            drop(dnd_state);
+            // Mirror current effective mode into the shared Arc so the
+            // socket server can answer `GetDnd` without re-reading config.
             let mut mode = self.dnd_mode.lock().await;
             *mode = config.dnd.mode;
+            drop(mode);
 
             let dnd_state = self.dnd_state.lock().await;
-            dnd_state.should_suppress(&notification, &config.dnd, app_override)
+            let result =
+                dnd_state.should_suppress(&notification, &config.dnd, app_override.as_ref());
+            (result, config.history.enabled)
         };
+
+        // 7. Persist unless Drop, OR history is disabled entirely.
+        tracing::debug!(
+            id,
+            app = %input.app_name,
+            ?suppress_result,
+            history_enabled,
+            "manager: about to decide storage"
+        );
+        if history_enabled && suppress_result != SuppressResult::Drop {
+            match self.db.insert_notification(&notification).await {
+                Ok(_) => tracing::debug!(id, "manager: stored in SQLite"),
+                Err(e) => tracing::error!(id, "manager: insert failed: {e}"),
+            }
+        } else if !history_enabled {
+            tracing::debug!(id, "manager: skipped storage (history disabled)");
+        } else {
+            tracing::debug!(id, "manager: skipped storage (DND drop)");
+        }
 
         // 8. Act on result.
         match suppress_result {
@@ -144,6 +161,9 @@ impl NotificationManager {
             SuppressResult::Queue => {
                 tracing::debug!(id, %group_key, "notification queued (fullscreen)");
                 self.fullscreen_queue.lock().await.push(notification);
+            }
+            SuppressResult::Drop => {
+                tracing::debug!(id, %group_key, "notification dropped (blocked)");
             }
         }
 
@@ -182,11 +202,28 @@ impl NotificationManager {
     }
 
     /// Run retention cleanup.
+    ///
+    /// When `history.enabled = false` the database is wiped on every
+    /// tick so nothing ever accumulates. Otherwise the configured
+    /// age/count limits are enforced.
     pub async fn cleanup(&self) {
-        let config = self.config.lock().await;
-        let max_age = config.retention.max_age_days;
-        let max_count = config.retention.max_count;
-        drop(config);
+        let (enabled, max_age, max_count) = {
+            let config = self.config.lock().await;
+            (
+                config.history.enabled,
+                config.history.max_age_days,
+                config.history.max_count,
+            )
+        };
+
+        if !enabled {
+            match self.db.cleanup(0, 0).await {
+                Ok(n) if n > 0 => tracing::info!("history disabled: wiped {n} notifications"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("history wipe failed: {e}"),
+            }
+            return;
+        }
 
         match self.db.cleanup(max_age, max_count).await {
             Ok(n) if n > 0 => tracing::info!("retention cleanup: removed {n} notifications"),
@@ -230,7 +267,7 @@ mod tests {
     async fn test_handle_notify_dnd_suppresses() {
         let db = Arc::new(Database::open_memory().await.unwrap());
         let mut config = Config::default();
-        config.dnd.mode = DndMode::On;
+        config.dnd.mode = DndMode::Priority;
         let config = Arc::new(Mutex::new(config));
         let (tx, mut rx) = broadcast::channel(64);
         let mgr = NotificationManager::new(db, config, tx);
@@ -251,7 +288,7 @@ mod tests {
     async fn test_handle_notify_critical_bypasses_dnd() {
         let db = Arc::new(Database::open_memory().await.unwrap());
         let mut config = Config::default();
-        config.dnd.mode = DndMode::On;
+        config.dnd.mode = DndMode::Priority;
         let config = Arc::new(Mutex::new(config));
         let (tx, mut rx) = broadcast::channel(64);
         let mgr = NotificationManager::new(db, config, tx);
