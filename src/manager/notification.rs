@@ -185,6 +185,25 @@ impl NotificationManager {
         }
     }
 
+    /// Activate Focus Mode suppression for a project.
+    ///
+    /// `suppress_apps` is matched case-insensitively against incoming
+    /// `app_name` values during the DND check. Re-activating with a new
+    /// project_id replaces the previous state (no additive behaviour),
+    /// matching the ephemeral `FocusSuppression` semantics.
+    pub async fn activate_focus(&self, project_id: String, suppress_apps: Vec<String>) {
+        self.dnd_state
+            .lock()
+            .await
+            .focus
+            .activate(project_id, suppress_apps);
+    }
+
+    /// Deactivate Focus Mode suppression.
+    pub async fn deactivate_focus(&self) {
+        self.dnd_state.lock().await.focus.deactivate();
+    }
+
     /// Flush queued notifications (max 5, for fullscreen exit).
     async fn flush_fullscreen_queue(&self) {
         let mut queue = self.fullscreen_queue.lock().await;
@@ -333,6 +352,50 @@ mod tests {
 
         // Should be dismissed in DB.
         assert_eq!(mgr.db.count_pending().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_activate_and_deactivate_focus() {
+        let (mgr, mut rx) = make_manager().await;
+
+        // Before focus: Slack notification passes.
+        mgr.handle_notify(1, "Slack", "", "Msg", "hi", &[], 1, "", -1)
+            .await;
+        let _ = rx.try_recv(); // Drain.
+
+        // Activate focus with Slack suppressed.
+        mgr.activate_focus("proj-1".into(), vec!["Slack".into()])
+            .await;
+
+        mgr.handle_notify(2, "Slack", "", "Msg2", "hi", &[], 1, "", -1)
+            .await;
+        // Suppressed by focus — no broadcast.
+        assert!(rx.try_recv().is_err());
+
+        // A different app still passes.
+        mgr.handle_notify(3, "Firefox", "", "Done", "", &[], 1, "", -1)
+            .await;
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, NotifyEvent::Added(_)));
+
+        // Deactivate -> Slack passes again.
+        mgr.deactivate_focus().await;
+        mgr.handle_notify(4, "Slack", "", "Msg3", "hi", &[], 1, "", -1)
+            .await;
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, NotifyEvent::Added(_)));
+    }
+
+    #[tokio::test]
+    async fn test_focus_critical_still_broadcasts() {
+        let (mgr, mut rx) = make_manager().await;
+        mgr.activate_focus("p".into(), vec!["Slack".into()]).await;
+
+        // urgency=2 -> critical, bypasses focus suppression.
+        mgr.handle_notify(1, "Slack", "", "ALERT", "", &[], 2, "", -1)
+            .await;
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, NotifyEvent::Added(_)));
     }
 
     #[tokio::test]

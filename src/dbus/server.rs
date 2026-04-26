@@ -15,6 +15,7 @@ use zbus::interface;
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::{OwnedValue, Value};
 
+use crate::dbus::icon_hints;
 use crate::manager::NotificationManager;
 
 // ---------------------------------------------------------------------------
@@ -234,10 +235,18 @@ impl NotificationServer {
             })
             .unwrap_or_default();
 
+        // Resolve the effective icon from hints + positional arg per
+        // FDO priority: image-data > image-path > app_icon. Apps like
+        // Discord / Slack / Firefox ship per-notification favicons via
+        // `image-data`; without this step those would all show letter
+        // fallbacks in the shell.
+        let resolved_icon = icon_hints::resolve_icon(&hints, app_icon);
+
         tracing::info!(
             id,
             app_name,
-            app_icon,
+            app_icon_arg = app_icon,
+            resolved_icon_kind = icon_kind(&resolved_icon),
             %summary,
             urgency,
             %category,
@@ -258,7 +267,7 @@ impl NotificationServer {
             .handle_notify(
                 id,
                 app_name,
-                app_icon,
+                &resolved_icon,
                 summary,
                 body,
                 &actions,
@@ -287,10 +296,16 @@ impl NotificationServer {
     }
 
     /// Return supported capabilities.
+    ///
+    /// `body-markup` is intentionally **not** advertised: the shell
+    /// renders every notification body as plain text and the daemon
+    /// strips any HTML that arrives (see `manager::validation::strip_markup`).
+    /// Announcing a markup capability we do not honour would mislead
+    /// well-behaved senders into shipping tags that the user never sees
+    /// in their styled form.
     fn get_capabilities(&self) -> Vec<String> {
         vec![
             "body".to_owned(),
-            "body-markup".to_owned(),
             "actions".to_owned(),
             "icon-static".to_owned(),
             "persistence".to_owned(),
@@ -324,6 +339,21 @@ impl NotificationServer {
         id: u32,
         action_key: &str,
     ) -> zbus::Result<()>;
+}
+
+/// Classify the resolved icon string for structured logging. Avoids
+/// dumping megabyte-long base64 data URLs into `tracing::info` output
+/// while still capturing which of the three FDO sources was picked.
+fn icon_kind(icon: &str) -> &'static str {
+    if icon.is_empty() {
+        "none"
+    } else if icon.starts_with("data:") {
+        "image-data"
+    } else if icon.starts_with('/') {
+        "image-path"
+    } else {
+        "theme-name"
+    }
 }
 
 // ---------------------------------------------------------------------------

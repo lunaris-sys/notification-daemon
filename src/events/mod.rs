@@ -1,8 +1,11 @@
 /// Event types for compositor / Event Bus integration.
 ///
-/// These are consumed by the daemon to track fullscreen state and
-/// focus changes. The actual Event Bus connection is Phase 4; for now
-/// these types define the interface.
+/// The in-process `SystemEvent` + `ChannelEventSource` types remain
+/// available for tests and early integration. The production path is
+/// the `consumer` submodule, which talks to `/run/lunaris/event-bus-consumer.sock`
+/// directly and drives the `NotificationManager` state.
+
+pub mod consumer;
 
 use serde::{Deserialize, Serialize};
 

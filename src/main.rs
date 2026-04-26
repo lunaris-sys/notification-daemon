@@ -11,6 +11,7 @@ use zbus::connection;
 
 use lunaris_notification_daemon::config;
 use lunaris_notification_daemon::dbus::NotificationServer;
+use lunaris_notification_daemon::events;
 use lunaris_notification_daemon::manager::NotificationManager;
 use lunaris_notification_daemon::socket::SocketServer;
 use lunaris_notification_daemon::storage::Database;
@@ -85,7 +86,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // 7. Retention cleanup task (runs daily).
+    // 7. Event Bus consumer: subscribe to `focus.*` and
+    // `window.fullscreen_*` events so the DND state machine updates
+    // when the shell enters/leaves Focus Mode or the compositor
+    // enters/leaves fullscreen. Failures log and retry — the daemon
+    // must keep working if the Event Bus is down.
+    events::consumer::start(manager.clone());
+
+    // 8. Retention cleanup task (runs daily).
     let manager_for_cleanup = manager.clone();
     tokio::spawn(async move {
         loop {
